@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import ast
+import errno
 import io
 import json
 import os
@@ -700,6 +701,35 @@ class TestSpecialRelease(DistroTestCase):
 
         desired_outcome = {"id": "empty"}
         self._test_outcome(desired_outcome)
+
+    def test_absolutesymlinks(self) -> None:
+        self.distro = distro.LinuxDistribution(
+            root_dir=os.path.join(TESTDISTROS, "distro", "absolutesymlinks")
+        )
+        desired_outcome = {"id": "absolutesymlinks"}
+        self._test_outcome(desired_outcome)
+
+    def test_rootdirescape(self) -> None:
+        self.distro = distro.LinuxDistribution(
+            root_dir=os.path.join(TESTDISTROS, "distro", "rootdirescape")
+        )
+        with pytest.raises(PermissionError, match=r"resolves outside"):
+            self.distro.id()
+
+    def test_rootdirnonescape(self) -> None:
+        self.distro = distro.LinuxDistribution(
+            root_dir=os.path.join(TESTDISTROS, "distro", "rootdirnonescape")
+        )
+        desired_outcome = {"id": "rootdirnonescape"}
+        self._test_outcome(desired_outcome)
+
+    def test_symlinksloop(self) -> None:
+        self.distro = distro.LinuxDistribution(
+            root_dir=os.path.join(TESTDISTROS, "distro", "symlinksloop")
+        )
+        with pytest.raises(OSError) as excinfo:
+            self.distro.id()
+        assert excinfo.value.errno == errno.ELOOP
 
     def test_dontincludeuname(self) -> None:
         self._setup_for_distro(os.path.join(TESTDISTROS, "distro", "dontincludeuname"))

@@ -29,6 +29,7 @@ access to OS distribution information is needed. See `Python issue 1322
 """
 
 import argparse
+import errno
 import json
 import logging
 import os
@@ -744,6 +745,9 @@ class LinuxDistribution:
         * :py:exc:`ValueError`: Initialization parameters combination is not
            supported.
 
+        * :py:exc:`PermissionError`: Execution has been halted as a path is
+           leading to outside ``root_dir``, if specified.
+
         * :py:exc:`OSError`: Some I/O issue with an os-release file or distro
           release file.
 
@@ -766,8 +770,10 @@ class LinuxDistribution:
 
             # NOTE: The idea is to respect order **and** have it set
             #       at all times for API backwards compatibility.
-            if os.path.isfile(etc_dir_os_release_file) or not os.path.isfile(
-                usr_lib_os_release_file
+            if (
+                self.root_dir is not None
+                or os.path.isfile(etc_dir_os_release_file)
+                or not os.path.isfile(usr_lib_os_release_file)
             ):
                 self.os_release_file = etc_dir_os_release_file
             else:
@@ -1078,6 +1084,53 @@ class LinuxDistribution:
         """
         return self._uname_info.get(attribute, "")
 
+    def __resolve_chroot_symlink(self, link_location: str) -> str:
+        # only resolve symlink if root_dir is set and link is under it
+        if (
+            self.root_dir is None
+            or os.path.commonprefix([self.root_dir, link_location]) != self.root_dir
+        ):
+            return link_location
+
+        seen_paths = []
+        while True:
+            try:
+                resolved = os.readlink(link_location)
+            except OSError:  # includes case "not a symlink"
+                if (
+                    os.path.commonprefix(
+                        [
+                            os.path.realpath(self.root_dir),
+                            os.path.realpath(link_location),
+                        ]
+                    )
+                    != os.path.realpath(self.root_dir)
+                ):
+                    raise PermissionError(
+                        f"{link_location} resolves outside of {self.root_dir}."
+                    ) from None
+
+                return link_location
+
+            if os.path.isabs(resolved):
+                # i.e. absolute path (regarding to the chroot), that we need to
+                # "move" back inside the chroot.
+                # But first we have to strip literals making this path absolute.
+                resolved = os.path.splitdrive(resolved)[1].lstrip(os.sep)
+                if os.altsep is not None:
+                    resolved.lstrip(os.altsep)
+                resolved = os.path.join(self.root_dir, resolved)
+            else:
+                # i.e. relative path that we make absolute
+                resolved = os.path.join(os.path.dirname(link_location), resolved)
+
+            # prevent symlinks infinite loop
+            if resolved in seen_paths:
+                raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), resolved)
+
+            seen_paths.append(link_location)
+            link_location = resolved
+
     @cached_property
     def _os_release_info(self) -> Dict[str, str]:
         """
@@ -1086,10 +1139,13 @@ class LinuxDistribution:
         Returns:
             A dictionary containing all information items.
         """
-        if os.path.isfile(self.os_release_file):
-            with open(self.os_release_file, encoding="utf-8") as release_file:
+        try:
+            with open(
+                self.__resolve_chroot_symlink(self.os_release_file), encoding="utf-8"
+            ) as release_file:
                 return self._parse_os_release_content(release_file)
-        return {}
+        except FileNotFoundError:
+            return {}
 
     @staticmethod
     def _parse_os_release_content(lines: TextIO) -> Dict[str, str]:
@@ -1254,7 +1310,11 @@ class LinuxDistribution:
                     basename
                     for basename in os.listdir(self.etc_dir)
                     if basename not in _DISTRO_RELEASE_IGNORE_BASENAMES
-                    and os.path.isfile(os.path.join(self.etc_dir, basename))
+                    and os.path.isfile(
+                        self.__resolve_chroot_symlink(
+                            os.path.join(self.etc_dir, basename)
+                        )
+                    )
                 ]
                 # We sort for repeatability in cases where there are multiple
                 # distro specific files; e.g. CentOS, Oracle, Enterprise all
@@ -1301,7 +1361,7 @@ class LinuxDistribution:
             A dictionary containing all information items.
         """
         try:
-            with open(filepath, encoding="utf-8") as fp:
+            with open(self.__resolve_chroot_symlink(filepath), encoding="utf-8") as fp:
                 # Only parse the first line. For instance, on SLES there
                 # are multiple lines. We don't want them...
                 return self._parse_distro_release_content(fp.readline())
